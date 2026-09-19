@@ -5410,6 +5410,41 @@ async def test_auto_mode_thinking_backfill_ignores_other_provider_parts(allow_mo
     assert 'reasoning_content' not in synthetic_turn
 
 
+async def test_auto_mode_thinking_backfill_scopes_to_provider_not_model_name(allow_model_requests: None):
+    """Provider, not the reported model id, is the scoping boundary for `'auto'` backfill.
+
+    `ModelResponse.model_name` records the provider-reported `response.model`, which drifts across
+    aliased and versioned ids even for the same model behind a gateway, so model-identity matching
+    cannot distinguish a model switch from version drift. The backfill therefore uses the same
+    provider-scoped boundary `_map_response_thinking_part` already applies when sending real
+    thinking content back (#4009). If a second field shows up in history, the ambiguous-fields
+    guard above fails closed instead.
+    """
+    model = OpenAIChatModel('model-b', provider=OpenAIProvider(api_key='dummy'))
+    history: list[ModelMessage] = [
+        ModelRequest(parts=[UserPromptPart(content='Find the dice tool.')]),
+        ModelResponse(
+            parts=[ThinkingPart(content='I should search.', id='reasoning_content', provider_name=model.system)],
+            model_name='model-a',
+            provider_name=model.system,
+        ),
+        ModelRequest(parts=[UserPromptPart(content='Go ahead.')]),
+        ModelResponse(
+            parts=[ToolCallPart(tool_name='roll_dice', args={}, tool_call_id='call_1')],
+            provider_name=model.system,
+        ),
+    ]
+
+    mapped = cast(Any, await model._map_messages(history, ModelRequestParameters()))  # pyright: ignore[reportPrivateUsage]
+
+    synthetic_turn = next(
+        message
+        for message in mapped
+        if any(call['function']['name'] == 'roll_dice' for call in message.get('tool_calls', ()))
+    )
+    assert synthetic_turn.get('reasoning_content') == ''
+
+
 async def test_openai_custom_reasoning_field_not_sending(allow_model_requests: None):
     c = completion_message(
         ChatCompletionMessage.model_construct(content='response', reasoning_content='reasoning', role='assistant')
